@@ -1,10 +1,11 @@
 "use client";
 
-import { useState, Fragment } from "react";
-import { Loader2, AlertCircle, Globe, ChevronRight, ChevronDown, Check, Minus, X } from "lucide-react";
+import { useMemo, useState, Fragment } from "react";
+import { Loader2, AlertCircle, Globe, Search, ChevronRight, ChevronDown, Check, Minus, X } from "lucide-react";
 import { useAllSites, useAuditSite, useSiteGradeContract } from "@/lib/hooks/useSiteGrade";
 import { useWallet } from "@/lib/genlayer/wallet";
 import { Button } from "./ui/button";
+import { Input } from "./ui/input";
 import { GradeBadge } from "./GradeBadge";
 import {
   ACCESSIBILITY_CHECKS,
@@ -15,14 +16,28 @@ import {
   pathOf,
   type CheckKey,
   type Checks,
+  type Grade,
   type Site,
 } from "@/lib/contracts/types";
+
+const GRADE_FILTERS: (Grade | "any")[] = ["any", "A", "B", "C", "D", "F"];
 
 export function SitesTable() {
   const contract = useSiteGradeContract();
   const { sites, isLoading, isError } = useAllSites();
   const { isConnected } = useWallet();
   const { auditSite, isAuditing, auditingSiteId } = useAuditSite();
+  const [query, setQuery] = useState("");
+  const [gradeFilter, setGradeFilter] = useState<Grade | "any">("any");
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return sites.filter((s) => {
+      const matchesQuery = !q || s.domain.toLowerCase().includes(q) || s.url.toLowerCase().includes(q) || s.id === q;
+      const matchesGrade = gradeFilter === "any" || s.grade === gradeFilter;
+      return matchesQuery && matchesGrade;
+    });
+  }, [sites, query, gradeFilter]);
 
   if (isLoading) {
     return (
@@ -72,6 +87,39 @@ export function SitesTable() {
 
   return (
     <div className="brand-card p-6 overflow-hidden">
+      <div className="flex flex-col sm:flex-row gap-3 mb-4">
+        <div className="relative flex-1">
+          <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search by domain, URL or site id..."
+            className="pl-9"
+            aria-label="Search graded sites"
+          />
+        </div>
+        <select
+          value={gradeFilter}
+          onChange={(e) => setGradeFilter(e.target.value as Grade | "any")}
+          aria-label="Filter by grade"
+          className="rounded-md border border-input bg-transparent px-3 text-sm"
+        >
+          {GRADE_FILTERS.map((g) => (
+            <option key={g} value={g} className="bg-background">
+              {g === "any" ? "Any grade" : `Grade ${g}`}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {filtered.length === 0 ? (
+        <div className="py-12 text-center space-y-2">
+          <Search className="w-10 h-10 mx-auto text-muted-foreground opacity-30" />
+          <p className="text-muted-foreground text-sm">
+            No sites match &quot;{query}&quot;{gradeFilter !== "any" ? ` with grade ${gradeFilter}` : ""}.
+          </p>
+        </div>
+      ) : (
       <div className="overflow-x-auto">
         <table className="w-full">
           <thead>
@@ -87,7 +135,7 @@ export function SitesTable() {
             </tr>
           </thead>
           <tbody className="divide-y divide-white/5">
-            {sites.map((site) => (
+            {filtered.map((site) => (
               <SiteRow
                 key={site.id}
                 site={site}
@@ -99,6 +147,7 @@ export function SitesTable() {
           </tbody>
         </table>
       </div>
+      )}
     </div>
   );
 }
