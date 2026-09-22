@@ -90,8 +90,22 @@ export function useRegisterSite() {
         throw new Error("Wallet not connected. Please connect your wallet to register a site.");
       }
       setIsRegistering(true);
+
+      // A write's transaction can come back ACCEPTED even when the contract itself
+      // rejected it (register_site reverts if the page never resolved) — ACCEPTED
+      // only means "the network processed this transaction", not "it succeeded".
+      // So confirm the call actually created a site before calling it a success.
+      const before = await contract.listSitesByOwner(address);
       const feePreset = await contract.estimateRegisterSiteFees(url, feePresetLevel ?? "standard");
-      return contract.registerSite(url, feePreset);
+      await contract.registerSite(url, feePreset);
+      const after = await contract.listSitesByOwner(address);
+
+      if (after.length <= before.length) {
+        throw new Error(
+          "GenLayer validators could not load that page (it must answer HTTP 200 with HTML over https, and must not block automated requests), so nothing was registered."
+        );
+      }
+      return after.find((id) => !before.includes(id));
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["siteIds"] });
