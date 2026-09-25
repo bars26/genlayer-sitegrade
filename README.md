@@ -81,6 +81,12 @@ The W3C pair is a useful sanity check: the same demo page before and after its p
 - **A working Next.js frontend** (`frontend/`): sites table with expandable per-check reports and fix hints, grade distribution with the most common misses, an integrator gate card, and a register-a-site form
 - Contract linting, a GitHub Actions CI workflow, and a deploy script (`deploy/deployScript.ts`)
 
+## Reproduce it and troubleshoot
+
+[`docs/REPRODUCTION.md`](docs/REPRODUCTION.md) walks through register, re-audit, `get_grade` and `meets_grade` from the live UI, lists the
+on-chain transactions sent from it (with explorer links), explains why an `ACCEPTED` transaction can still create no site, and documents the
+RPC rate-limit handling (backoff on reads and polling, guidance on sends) and the distinct error messages the UI shows.
+
 ## Requirements
 - Python >= 3.12
 - [GenLayer CLI](https://github.com/genlayerlabs/genlayer-cli): `npm install -g genlayer`

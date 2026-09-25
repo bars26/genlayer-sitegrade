@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Loader2, ShieldCheck } from "lucide-react";
 import { useSiteGradeContract } from "@/lib/hooks/useSiteGrade";
+import { classifyError } from "@/lib/utils/errors";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { GradeBadge } from "./GradeBadge";
@@ -29,8 +30,13 @@ export function GateLookup() {
       const id = siteId.trim();
       const [grade, passes] = await Promise.all([contract.getGrade(id), contract.meetsGrade(id, minGrade)]);
       setResult({ grade, passes, min: minGrade });
-    } catch {
-      setError("No site with that id. Try site_0.");
+    } catch (err) {
+      const e = classifyError(err, "read");
+      if (e.kind === "rate_limited" || e.kind === "rpc_unreachable") {
+        setError(`${e.message} ${e.hint ?? ""}`);
+      } else {
+        setError(`No site with that id (${e.detail.slice(0, 120)}). Try site_0.`);
+      }
     } finally {
       setLoading(false);
     }

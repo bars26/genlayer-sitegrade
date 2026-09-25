@@ -1,8 +1,11 @@
 "use client";
 
-import { useQuery, useQueries, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import SiteGrade from "../contracts/SiteGrade";
+import { SiteGradeError, classifyError } from "../utils/errors";
+import { mapWithConcurrency } from "../utils/retry";
+import { startTx, updateTx } from "./useTxLog";
 import { getContractAddress, getStudioUrl } from "../genlayer/client";
 import type { FeePresetLevel } from "../genlayer/fees";
 import { useWallet } from "../genlayer/wallet";
@@ -32,33 +35,35 @@ export function useSiteGradeContract(): SiteGrade | null {
   }, [contractAddress, address, studioUrl]);
 }
 
-/** Every site's full report. */
+/**
+ * Every site's full report.
+ *
+ * One query, not one per site: reads run at most 4 at a time with backoff, so loading the
+ * page never bursts the shared Studio RPC (which is what triggers "Request is being rate
+ * limited" on the very next write).
+ */
 export function useAllSites() {
   const contract = useSiteGradeContract();
 
-  const idsQuery = useQuery<string[], Error>({
-    queryKey: ["siteIds"],
-    queryFn: () => (contract ? contract.listSites() : Promise.resolve([])),
-    refetchOnWindowFocus: true,
-    staleTime: 2000,
+  const query = useQuery<Site[], Error>({
+    queryKey: ["sites"],
+    queryFn: async () => {
+      if (!contract) return [];
+      const ids = await contract.listSites();
+      return mapWithConcurrency(ids, 4, (id) => contract.getSite(id));
+    },
+    staleTime: 30_000,
+    retry: false,
+    refetchOnWindowFocus: false,
     enabled: !!contract,
   });
 
-  const siteQueries = useQueries({
-    queries: (idsQuery.data ?? []).map((id) => ({
-      queryKey: ["site", id],
-      queryFn: () => contract!.getSite(id),
-      enabled: !!contract,
-      staleTime: 2000,
-    })),
-  });
-
-  const sites: Site[] = siteQueries.map((q) => q.data).filter((s): s is Site => !!s);
-
   return {
-    sites,
-    isLoading: idsQuery.isLoading || siteQueries.some((q) => q.isLoading),
-    isError: idsQuery.isError || siteQueries.some((q) => q.isError),
+    sites: query.data ?? [],
+    isLoading: query.isLoading,
+    isError: query.isError,
+    error: query.error,
+    refetch: query.refetch,
   };
 }
 
@@ -74,6 +79,20 @@ export function useSitesByOwner(owner: string | null) {
   });
 }
 
+function reportFailure(id: string, err: unknown, phase: "send" | "confirm" | "estimate" | "verify" | "read", title: string) {
+  const e = classifyError(err, phase);
+  updateTx(id, {
+    state: "failed",
+    txHash: e.txHash,
+    error: { kind: e.kind, message: e.message, hint: e.hint, detail: e.detail, phase: e.phase },
+  });
+  error(title, {
+    description: [e.message, e.hint, e.txHash ? `Tx: ${e.txHash}` : ""].filter(Boolean).join(" "),
+    duration: 12000,
+  });
+  return e;
+}
+
 /** Register a page to grade. */
 export function useRegisterSite() {
   const contract = useSiteGradeContract();
@@ -83,41 +102,77 @@ export function useRegisterSite() {
 
   const mutation = useMutation({
     mutationFn: async ({ url, feePresetLevel }: { url: string; feePresetLevel?: FeePresetLevel }) => {
-      if (!contract) {
-        throw new Error("Contract not configured. Please set NEXT_PUBLIC_CONTRACT_ADDRESS in your .env file.");
-      }
-      if (!address) {
-        throw new Error("Wallet not connected. Please connect your wallet to register a site.");
-      }
+      const logId = startTx("register", url);
       setIsRegistering(true);
+      try {
+        if (!contract) {
+          throw new SiteGradeError({
+            kind: "unknown",
+            phase: "send",
+            message: "The contract address is not configured.",
+            hint: "Set NEXT_PUBLIC_CONTRACT_ADDRESS.",
+          });
+        }
+        if (!address) {
+          throw new SiteGradeError({ kind: "wallet_missing", phase: "send", message: "No wallet is connected." });
+        }
 
-      // A write's transaction can come back ACCEPTED even when the contract itself
-      // rejected it (register_site reverts if the page never resolved) — ACCEPTED
-      // only means "the network processed this transaction", not "it succeeded".
-      // So confirm the call actually created a site before calling it a success.
-      const before = await contract.listSitesByOwner(address);
-      const feePreset = await contract.estimateRegisterSiteFees(url, feePresetLevel ?? "standard");
-      await contract.registerSite(url, feePreset);
-      const after = await contract.listSitesByOwner(address);
+        // Keep the owner-scoped count check as a second line of defence after the receipt check.
+        const before = await contract.listSitesByOwner(address);
 
-      if (after.length <= before.length) {
-        throw new Error(
-          "GenLayer validators could not load that page (it must answer HTTP 200 with HTML over https, and must not block automated requests), so nothing was registered."
+        updateTx(logId, { state: "estimating", progress: "Dry-running the call to estimate fees..." });
+        let feePreset;
+        try {
+          feePreset = await contract.estimateRegisterSiteFees(url, feePresetLevel ?? "standard", (m) =>
+            updateTx(logId, { progress: m })
+          );
+        } catch (err) {
+          throw classifyError(err, "estimate");
+        }
+
+        const result = await contract.registerSite(url, feePreset, (p) =>
+          updateTx(logId, {
+            state: p.step === "awaiting_wallet" ? "awaiting_wallet" : p.step === "accepted" ? "accepted" : "confirming",
+            txHash: p.txHash,
+            progress: p.message,
+          })
         );
+        updateTx(logId, {
+          state: "confirming",
+          txHash: result.txHash,
+          status: result.status,
+          executionResult: result.executionResult,
+          progress: "Checking that the site was created...",
+        });
+
+        const after = await contract.listSitesByOwner(address);
+        const created = after.find((id) => !before.includes(id));
+        if (!created) {
+          throw new SiteGradeError({
+            kind: "accepted_no_effect",
+            phase: "verify",
+            txHash: result.txHash,
+            message: "The transaction was ACCEPTED but no site appeared for your address.",
+            hint:
+              "Consensus processed the transaction but the contract stored nothing. If the list was just read from a lagging RPC node, refresh in a few seconds; otherwise the page could not be loaded by validators.",
+          });
+        }
+
+        updateTx(logId, { state: "accepted", siteId: created, progress: `Site ${created} created.` });
+        return { siteId: created, txHash: result.txHash };
+      } catch (err) {
+        reportFailure(logId, err, "verify", "Could not register site");
+        throw err;
+      } finally {
+        setIsRegistering(false);
       }
-      return after.find((id) => !before.includes(id));
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["siteIds"] });
+    onSuccess: ({ siteId, txHash }) => {
+      queryClient.invalidateQueries({ queryKey: ["sites"] });
       queryClient.invalidateQueries({ queryKey: ["sitesByOwner"] });
-      setIsRegistering(false);
-      success("Site registered!", { description: "Validators graded it once; the report appears below." });
-    },
-    onError: (err: any) => {
-      console.error("Error registering site:", err);
-      setIsRegistering(false);
-      error("Failed to register site", {
-        description: err?.message || "The page must answer HTTP 200 with HTML over https.",
+      success(`Site registered as ${siteId}`, {
+        description: `Validators graded it once. Tx ${txHash.slice(0, 10)}... is ACCEPTED (it finalizes after the appeal window).`,
+        duration: 8000,
       });
     },
   });
@@ -140,28 +195,50 @@ export function useAuditSite() {
 
   const mutation = useMutation({
     mutationFn: async (siteId: string) => {
-      if (!contract) {
-        throw new Error("Contract not configured. Please set NEXT_PUBLIC_CONTRACT_ADDRESS in your .env file.");
-      }
-      if (!address) {
-        throw new Error("Wallet not connected. Please connect your wallet to run an audit.");
-      }
+      const logId = startTx("audit", siteId);
       setIsAuditing(true);
       setAuditingSiteId(siteId);
-      return contract.auditSite(siteId);
+      try {
+        if (!contract) {
+          throw new SiteGradeError({
+            kind: "unknown",
+            phase: "send",
+            message: "The contract address is not configured.",
+            hint: "Set NEXT_PUBLIC_CONTRACT_ADDRESS.",
+          });
+        }
+        if (!address) {
+          throw new SiteGradeError({ kind: "wallet_missing", phase: "send", message: "No wallet is connected." });
+        }
+        const result = await contract.auditSite(siteId, (p) =>
+          updateTx(logId, {
+            state: p.step === "awaiting_wallet" ? "awaiting_wallet" : p.step === "accepted" ? "accepted" : p.step === "estimating" ? "estimating" : "confirming",
+            txHash: p.txHash,
+            progress: p.message,
+          })
+        );
+        updateTx(logId, {
+          state: "accepted",
+          txHash: result.txHash,
+          status: result.status,
+          executionResult: result.executionResult,
+          progress: "Audit stored on-chain.",
+        });
+        return { siteId, txHash: result.txHash };
+      } catch (err) {
+        reportFailure(logId, err, "send", "Could not re-audit site");
+        throw err;
+      } finally {
+        setIsAuditing(false);
+        setAuditingSiteId(null);
+      }
     },
-    onSuccess: (_data, siteId) => {
-      queryClient.invalidateQueries({ queryKey: ["site", siteId] });
-      queryClient.invalidateQueries({ queryKey: ["siteIds"] });
-      setIsAuditing(false);
-      setAuditingSiteId(null);
-      success("Audit complete!", { description: "Validators independently reloaded the page and reached consensus." });
-    },
-    onError: (err: any) => {
-      console.error("Error auditing site:", err);
-      setIsAuditing(false);
-      setAuditingSiteId(null);
-      error("Failed to audit site", { description: err?.message || "Please try again." });
+    onSuccess: ({ txHash }) => {
+      queryClient.invalidateQueries({ queryKey: ["sites"] });
+      success("Audit complete", {
+        description: `Validators independently reloaded the page and agreed. Tx ${txHash.slice(0, 10)}... is ACCEPTED.`,
+        duration: 8000,
+      });
     },
   });
 

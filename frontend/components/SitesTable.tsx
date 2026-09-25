@@ -6,6 +6,7 @@ import { useAllSites, useAuditSite, useSiteGradeContract } from "@/lib/hooks/use
 import { useWallet } from "@/lib/genlayer/wallet";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
+import { toErrorInfo } from "@/lib/utils/errors";
 import { GradeBadge } from "./GradeBadge";
 import {
   ACCESSIBILITY_CHECKS,
@@ -24,7 +25,7 @@ const GRADE_FILTERS: (Grade | "any")[] = ["any", "A", "B", "C", "D", "F"];
 
 export function SitesTable() {
   const contract = useSiteGradeContract();
-  const { sites, isLoading, isError } = useAllSites();
+  const { sites, isLoading, isError, error: loadError, refetch } = useAllSites();
   const { isConnected } = useWallet();
   const { auditSite, isAuditing, auditingSiteId } = useAuditSite();
   const [query, setQuery] = useState("");
@@ -67,8 +68,16 @@ export function SitesTable() {
 
   if (isError) {
     return (
-      <div className="brand-card p-8">
-        <p className="text-center text-destructive">Failed to load sites. Please try again.</p>
+      <div className="brand-card p-8 space-y-3 text-center">
+        <p className="text-destructive font-semibold">{toErrorInfo(loadError).message}</p>
+        {toErrorInfo(loadError).hint && <p className="text-sm text-muted-foreground">{toErrorInfo(loadError).hint}</p>}
+        <details className="text-xs text-muted-foreground text-left max-w-xl mx-auto">
+          <summary className="cursor-pointer">Underlying error</summary>
+          <pre className="mt-1 whitespace-pre-wrap break-words font-mono">{toErrorInfo(loadError).detail}</pre>
+        </details>
+        <Button variant="gradient" size="sm" onClick={() => refetch()}>
+          Retry
+        </Button>
       </div>
     );
   }

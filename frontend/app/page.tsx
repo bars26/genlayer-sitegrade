@@ -4,6 +4,7 @@ import { Navbar } from "@/components/Navbar";
 import { SitesTable } from "@/components/SitesTable";
 import { GradePanel } from "@/components/GradePanel";
 import { GateLookup } from "@/components/GateLookup";
+import { TransactionPanel } from "@/components/TransactionPanel";
 
 export default function HomePage() {
   return (
@@ -31,6 +32,7 @@ export default function HomePage() {
             <div className="lg:col-span-4 space-y-6 animate-slide-up" style={{ animationDelay: "100ms" }}>
               <GradePanel />
               <GateLookup />
+              <TransactionPanel />
             </div>
           </div>
 
