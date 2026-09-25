@@ -73,7 +73,7 @@ export async function GET() {
       headers: {
         "Cache-Control": partial
           ? "public, s-maxage=20, stale-while-revalidate=60"
-          : "public, s-maxage=120, stale-while-revalidate=600",
+          : "public, s-maxage=120, stale-while-revalidate=86400",
       },
     });
   } catch (err) {

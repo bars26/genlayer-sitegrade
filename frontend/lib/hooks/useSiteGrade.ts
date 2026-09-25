@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import SiteGrade from "../contracts/SiteGrade";
 import { SiteGradeError, classifyError } from "../utils/errors";
+import { mapWithConcurrency } from "../utils/retry";
 import { startTx, updateTx } from "./useTxLog";
 import { getContractAddress, getStudioUrl } from "../genlayer/client";
 import type { FeePresetLevel } from "../genlayer/fees";
@@ -49,13 +50,32 @@ export function useAllSites() {
     queryFn: async () => {
       // Served from a CDN-cached server snapshot (app/api/sites) so page loads spend none of
       // the visitor's Studio rate-limit budget, which is shared with their transactions.
-      const res = await fetch("/api/sites");
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) throw classifyError(new Error(body?.error || `HTTP ${res.status}`), "read");
-      return { sites: (body.sites ?? []) as Site[], failedIds: (body.failedIds ?? []) as string[] };
+      try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 25_000);
+        const res = await fetch("/api/sites", { signal: ctrl.signal }).finally(() => clearTimeout(timer));
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok || !Array.isArray(body.sites)) throw new Error(body?.error || `HTTP ${res.status}`);
+        return { sites: body.sites as Site[], failedIds: (body.failedIds ?? []) as string[] };
+      } catch (snapshotErr) {
+        // Fallback: read the chain directly, slowly (2 at a time), tolerating individual failures.
+        if (!contract) throw classifyError(snapshotErr, "read");
+        const ids = await contract.listSites();
+        const results = await mapWithConcurrency(ids, 2, async (id) => {
+          try {
+            return { id, site: await contract.getSite(id) };
+          } catch {
+            return { id, site: null as Site | null };
+          }
+        });
+        return {
+          sites: results.filter((r) => r.site).map((r) => r.site as Site),
+          failedIds: results.filter((r) => !r.site).map((r) => r.id),
+        };
+      }
     },
     staleTime: 60_000,
-    retry: 2,
+    retry: 1,
     refetchOnWindowFocus: false,
     placeholderData: (prev) => prev,
     enabled: !!contract,

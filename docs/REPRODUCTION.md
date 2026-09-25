@@ -129,7 +129,7 @@ page was reloaded a few times in a minute.
 **Fix.**
 
 - The site list now comes from `GET /api/sites` (`frontend/app/api/sites/route.ts`), a server-side snapshot that reads the
-  contract from Vercel and is cached at the CDN (`s-maxage=120`, `stale-while-revalidate=600`). Measured locally: the page
+  contract from Vercel and is cached at the CDN (`s-maxage=120`, `stale-while-revalidate=86400`, so a visitor is always served the last snapshot instantly while it refreshes in the background). If the snapshot route is unreachable the page falls back to reading the chain directly, 2 requests at a time. Measured locally: the page
   now makes **0** Studio calls from the browser on load (was 25), and the table renders 24/24 sites.
 - After a register or re-audit, only the affected site is read from the chain (1 `gen_call`) and merged into the list, so
   the new grade shows immediately without re-reading everything.
