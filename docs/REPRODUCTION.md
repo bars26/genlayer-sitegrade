@@ -6,6 +6,26 @@ Studio explorer, and the contract views can be called from the CLI.
 - **Live UI:** https://sitegrade-bars26.vercel.app
 - **Contract:** [`0x95BF6dc4Ef493eacC002fEA5E792bf9b925525bB`](https://explorer-studio.genlayer.com/address/0x95BF6dc4Ef493eacC002fEA5E792bf9b925525bB) on GenLayer Studio (chain id 61999, RPC `https://studio.genlayer.com/api`)
 
+## 0. Fresh run on the fixed build (2026-09-25)
+
+After the error-handling fix was deployed, the owner's MetaMask wallet (`0x4f80b5c475fced34fc9a07ffccf39e1adc1406bf`)
+registered a new page through https://sitegrade-bars26.vercel.app:
+
+| Step | Result |
+|---|---|
+| `register_site("https://docs.genlayer.com")` from the live UI | Tx [`0xce81ece4ab23422f573ea4e093df4df5d2cfdb805d9e05ef2422a556cb23debd`](https://explorer-studio.genlayer.com/tx/0xce81ece4ab23422f573ea4e093df4df5d2cfdb805d9e05ef2422a556cb23debd), 2026-09-25 09:47 UTC: 3 validators agree, **FINALIZED**, contract result **SUCCESS**. The UI toast named the new id: "Site registered as site_23". |
+| `get_grade("site_23")` in the live UI's Integrator gate | **D** (security headers missing: CSP, framing, referrer; accessibility 70%) |
+| `meets_grade("site_23", "C")` in the live UI | **false**, "Below the bar" |
+| `meets_grade("site_23", "D")` in the live UI | **true**, "Clears the bar" |
+
+The same values come back from the CLI:
+
+```shell
+genlayer call 0x95BF6dc4Ef493eacC002fEA5E792bf9b925525bB get_grade --args site_23      # D
+genlayer call 0x95BF6dc4Ef493eacC002fEA5E792bf9b925525bB meets_grade --args site_23 C  # false
+genlayer call 0x95BF6dc4Ef493eacC002fEA5E792bf9b925525bB meets_grade --args site_23 D  # true
+```
+
 ## 1. The production build points at the submitted contract and network
 
 The address and chain id are inlined into the production JavaScript at build time, so this can be verified from the outside:
