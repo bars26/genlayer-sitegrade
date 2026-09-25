@@ -4,7 +4,6 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import SiteGrade from "../contracts/SiteGrade";
 import { SiteGradeError, classifyError } from "../utils/errors";
-import { mapWithConcurrency } from "../utils/retry";
 import { startTx, updateTx } from "./useTxLog";
 import { getContractAddress, getStudioUrl } from "../genlayer/client";
 import type { FeePresetLevel } from "../genlayer/fees";
@@ -45,26 +44,47 @@ export function useSiteGradeContract(): SiteGrade | null {
 export function useAllSites() {
   const contract = useSiteGradeContract();
 
-  const query = useQuery<Site[], Error>({
+  const query = useQuery<{ sites: Site[]; failedIds: string[] }, Error>({
     queryKey: ["sites"],
     queryFn: async () => {
-      if (!contract) return [];
-      const ids = await contract.listSites();
-      return mapWithConcurrency(ids, 4, (id) => contract.getSite(id));
+      // Served from a CDN-cached server snapshot (app/api/sites) so page loads spend none of
+      // the visitor's Studio rate-limit budget, which is shared with their transactions.
+      const res = await fetch("/api/sites");
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw classifyError(new Error(body?.error || `HTTP ${res.status}`), "read");
+      return { sites: (body.sites ?? []) as Site[], failedIds: (body.failedIds ?? []) as string[] };
     },
-    staleTime: 30_000,
-    retry: false,
+    staleTime: 60_000,
+    retry: 2,
     refetchOnWindowFocus: false,
+    placeholderData: (prev) => prev,
     enabled: !!contract,
   });
 
   return {
-    sites: query.data ?? [],
+    sites: query.data?.sites ?? [],
+    failedIds: query.data?.failedIds ?? [],
     isLoading: query.isLoading,
+    isFetching: query.isFetching,
     isError: query.isError,
     error: query.error,
     refetch: query.refetch,
   };
+}
+
+/** After a write, read just the affected site from the chain and merge it into the cached list. */
+async function mergeFreshSite(queryClient: ReturnType<typeof useQueryClient>, contract: SiteGrade, siteId: string) {
+  try {
+    const site = await contract.getSite(siteId);
+    queryClient.setQueryData<{ sites: Site[]; failedIds: string[] }>(["sites"], (prev) => {
+      const sites = prev?.sites ?? [];
+      const i = sites.findIndex((s) => s.id === siteId);
+      const next = i >= 0 ? sites.map((s) => (s.id === siteId ? site : s)) : [...sites, site];
+      return { sites: next, failedIds: (prev?.failedIds ?? []).filter((id) => id !== siteId) };
+    });
+  } catch {
+    // The tx is already confirmed; the next snapshot refresh will pick the change up.
+  }
 }
 
 /** Site ids registered by a given address. */
@@ -168,7 +188,7 @@ export function useRegisterSite() {
       }
     },
     onSuccess: ({ siteId, txHash }) => {
-      queryClient.invalidateQueries({ queryKey: ["sites"] });
+      if (contract) mergeFreshSite(queryClient, contract, siteId);
       queryClient.invalidateQueries({ queryKey: ["sitesByOwner"] });
       success(`Site registered as ${siteId}`, {
         description: `Validators graded it once. Tx ${txHash.slice(0, 10)}... is ACCEPTED (it finalizes after the appeal window).`,
@@ -233,8 +253,8 @@ export function useAuditSite() {
         setAuditingSiteId(null);
       }
     },
-    onSuccess: ({ txHash }) => {
-      queryClient.invalidateQueries({ queryKey: ["sites"] });
+    onSuccess: ({ siteId, txHash }) => {
+      if (contract) mergeFreshSite(queryClient, contract, siteId);
       success("Audit complete", {
         description: `Validators independently reloaded the page and agreed. Tx ${txHash.slice(0, 10)}... is ACCEPTED.`,
         duration: 8000,

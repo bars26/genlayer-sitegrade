@@ -14,6 +14,7 @@ registered a new page through https://sitegrade-bars26.vercel.app:
 | Step | Result |
 |---|---|
 | `register_site("https://docs.genlayer.com")` from the live UI | Tx [`0xce81ece4ab23422f573ea4e093df4df5d2cfdb805d9e05ef2422a556cb23debd`](https://explorer-studio.genlayer.com/tx/0xce81ece4ab23422f573ea4e093df4df5d2cfdb805d9e05ef2422a556cb23debd), 2026-09-25 09:47 UTC: 3 validators agree, **FINALIZED**, contract result **SUCCESS**. The UI toast named the new id: "Site registered as site_23". |
+| **Re-audit** of site_23 from the live UI | Tx [`0xbebdedb3ff012effeed434638676afee82f3f86ed5b17c81d42f481916f3e367`](https://explorer-studio.genlayer.com/tx/0xbebdedb3ff012effeed434638676afee82f3f86ed5b17c81d42f481916f3e367), 2026-09-25 09:57 UTC: `audit_site("site_23")`, 3 validators agree, **FINALIZED**, contract result **SUCCESS**. Toast: "Audit complete". |
 | `get_grade("site_23")` in the live UI's Integrator gate | **D** (security headers missing: CSP, framing, referrer; accessibility 70%) |
 | `meets_grade("site_23", "C")` in the live UI | **false**, "Below the bar" |
 | `meets_grade("site_23", "D")` in the live UI | **true**, "Clears the bar" |
@@ -44,7 +45,7 @@ Needs MetaMask on GenLayer Studio (chain id 61999). The read-only steps 3 and 4 
 
 | # | In the UI | What happens | How to check it independently |
 |---|---|---|---|
-| 1 | Connect the wallet, click **Grade a Site**, paste an https URL, **Register & Grade** | Fee dry-run, MetaMask prompt, validators each load the page. The **Your transactions** card shows the tx hash and status; on success a toast names the new `site_N`. | `genlayer call <contract> get_site --args site_N` |
+| 1 | Connect the wallet, click **Grade a Site**, paste an https URL, **Register & Grade** | MetaMask prompt, then validators each load the page. The **Your transactions** card shows the tx hash and status; on success a toast names the new `site_N`. | `genlayer call <contract> get_site --args site_N` |
 | 2 | Click **Re-audit** on any row | A second consensus audit runs; the row's grade and the 10-entry history update. | `genlayer call <contract> get_history --args site_N` |
 | 3 | **Integrator gate**, enter `site_4`, min grade `A`, **Check gate** | Shows the grade and `meets_grade("A") → true` (SiteGrade's own dashboard grades A/A). | `genlayer call <contract> get_grade --args site_4` then `genlayer call <contract> meets_grade --args site_4 A` |
 | 4 | Expand any row | Per-check results and fix hints. | The row is `get_site` rendered. |
@@ -102,26 +103,42 @@ https). Large sites such as Coinbase and DexScreener block automated requests, s
 
 The frontend used to report success for these. It now:
 
-1. Dry-runs the call before sending. If the contract already rejects the dry-run, nothing is sent and the UI says the page could not be loaded.
-2. Reads `execution_result` from the consensus receipt. If it is `ERROR` the UI says the transaction was ACCEPTED but the
+1. Reads `execution_result` from the consensus receipt. If it is `ERROR` the UI says the transaction was ACCEPTED but the
    contract rejected the call, shows the hash, and preserves the underlying error text.
-3. Still checks `list_sites_by_owner` afterwards as a second line of defence, and explains the case where the count did not grow.
+2. Still checks `list_sites_by_owner` afterwards as a second line of defence, and explains the case where the count did not grow.
 
-## 5. The "Request is being rate limited" error
+## 5. The "Request is being rate limited" error: root cause and fix
 
 A reviewer saw `eth_sendRawTransaction` fail with *Request is being rate limited* in the browser console while the UI only
 said "Failed to register site".
 
-- **What it is.** A rate-limit response from the shared, public GenLayer Studio RPC. The RPC returns it *before* a transaction
-  exists, so it leaves nothing on chain, and it cannot be reproduced on demand. All 23 sends from the live UI on 2026-09-22 got through.
-  It is a transient throttle on the shared endpoint, not a problem with the contract address or the network configuration (section 1).
-- **A contributing factor on our side, now fixed.** The previous build read every site with its own request, all fired at the same time
-  (24 RPC calls on each page load). Since the wallet's RPC and the page's reads share the same throttle, a burst of reads makes
-  a rate limit on the next write more likely. Reads now go through one query that runs at most 4 requests at a time
-  (24 requests spread over about 7 seconds), with a 30 second cache and no refetch on window focus.
-- **Retry policy.** Reads, fee estimation and receipt polling retry with exponential backoff and jitter (up to 4 attempts) on
-  rate limits and unreachable-RPC responses, and the UI says when it is retrying. **Sending is never auto-retried**: each attempt would
-  prompt the wallet again. A rate-limited send shows the guidance to wait about 30 seconds and click again.
+**Root cause (it was this app, not a GenLayer outage).** GenLayer Studio publishes its limits in response headers
+(`X-RateLimit-Bucket`, `X-RateLimit-Limit`, `X-RateLimit-Window`). Per client IP:
+
+| Bucket | Limit | Methods (checked 2026-09-25) |
+|---|---|---|
+| `standard` | **30 / minute** | `gen_call` (every contract read), `eth_call`, `eth_sendRawTransaction`, `eth_sendTransaction` |
+| `read` | 300 / minute | `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `gen_getTransactionStatus`, `eth_estimateGas`, `eth_gasPrice`, `eth_chainId`, ... |
+
+Contract reads and transaction submission share the same 30-per-minute budget. The previous build read the list and then
+every site from the visitor's browser on each page load: **25 `gen_call`s**. A visitor who opened the page (or reloaded it once)
+and then clicked **Register** had already used almost the whole minute's budget, so the wallet's `eth_sendRawTransaction` was
+rejected. That is exactly the reported sequence. The same exhaustion also produced a "Failed to fetch" on page load when the
+page was reloaded a few times in a minute.
+
+**Fix.**
+
+- The site list now comes from `GET /api/sites` (`frontend/app/api/sites/route.ts`), a server-side snapshot that reads the
+  contract from Vercel and is cached at the CDN (`s-maxage=120`, `stale-while-revalidate=600`). Measured locally: the page
+  now makes **0** Studio calls from the browser on load (was 25), and the table renders 24/24 sites.
+- After a register or re-audit, only the affected site is read from the chain (1 `gen_call`) and merged into the list, so
+  the new grade shows immediately without re-reading everything.
+- A register now costs the visitor about 4 standard-bucket calls (owner list before, the send, owner list after, the new
+  site), well under 30/min. Receipt polling uses the 300/min read bucket.
+- One failed read no longer hides the table: the rows that loaded are shown, with a banner and a Retry button for the rest.
+- If a send is still rate limited (for example after many transactions in one minute), the UI says so, explains the
+  30-per-minute limit, and asks the user to wait up to a minute. Sends are never auto-retried, because each attempt would
+  prompt the wallet again. Reads and receipt polling retry with exponential backoff and jitter.
 
 ## 6. Distinct, readable errors
 
@@ -132,10 +149,10 @@ Every failure names the phase it happened in and keeps the raw underlying error 
 | `wallet_missing` | No wallet connected | no |
 | `wallet_rejected` | You dismissed the MetaMask prompt (code 4001) | no |
 | `wrong_network` | Wallet is not on GenLayer Studio | no |
-| `rate_limited` | RPC answers with a rate-limit error | reads, estimates and polling: yes |
+| `rate_limited` | RPC answers with a rate-limit error (Studio: 30 contract calls/transactions per minute per IP) | reads and polling: yes; sends: no, wait up to a minute |
 | `rpc_unreachable` | RPC returns an HTML error page or nothing | reads, estimates and polling: yes |
-| `fee_estimation` | The fee dry-run fails for another reason | no |
-| `contract_revert` | The dry-run is rejected by the contract (page could not be loaded) | no |
+| `fee_estimation` | Fee estimation fails (only on SDK versions that support it) | no |
+| `contract_revert` | The node rejects the call as a revert before or while sending | no |
 | `accepted_no_effect` | Tx ACCEPTED but the contract result is `ERROR`, or no site appeared | no |
 | `timeout` | No consensus within about 2 minutes; the tx hash is kept so it can be checked later | polling: yes |
 | `unknown` | Anything else, with the raw error shown | no |

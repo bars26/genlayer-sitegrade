@@ -72,7 +72,7 @@ class SiteGrade {
   private read<T>(functionName: string, args: unknown[]): Promise<T> {
     return withBackoff(
       () => this.client.readContract({ address: this.contractAddress, functionName, args }) as Promise<T>,
-      { phase: "read" }
+      { phase: "read", attempts: 5 }
     );
   }
 

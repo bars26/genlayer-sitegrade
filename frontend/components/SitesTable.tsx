@@ -25,7 +25,7 @@ const GRADE_FILTERS: (Grade | "any")[] = ["any", "A", "B", "C", "D", "F"];
 
 export function SitesTable() {
   const contract = useSiteGradeContract();
-  const { sites, isLoading, isError, error: loadError, refetch } = useAllSites();
+  const { sites, failedIds, isLoading, isFetching, isError, error: loadError, refetch } = useAllSites();
   const { isConnected } = useWallet();
   const { auditSite, isAuditing, auditingSiteId } = useAuditSite();
   const [query, setQuery] = useState("");
@@ -66,7 +66,7 @@ export function SitesTable() {
     );
   }
 
-  if (isError) {
+  if (isError && sites.length === 0) {
     return (
       <div className="brand-card p-8 space-y-3 text-center">
         <p className="text-destructive font-semibold">{toErrorInfo(loadError).message}</p>
@@ -96,6 +96,18 @@ export function SitesTable() {
 
   return (
     <div className="brand-card p-6 overflow-hidden">
+      {(failedIds.length > 0 || isError) && (
+        <div className="mb-4 flex flex-col sm:flex-row sm:items-center justify-between gap-2 rounded-md border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-sm">
+          <span>
+            {isError
+              ? "The latest refresh failed (the Studio RPC was busy or unreachable); showing the last loaded data."
+              : `${failedIds.length} site${failedIds.length === 1 ? "" : "s"} (${failedIds.join(", ")}) could not be read just now because the Studio RPC was busy.`}
+          </span>
+          <Button size="sm" variant="secondary" onClick={() => refetch()} disabled={isFetching}>
+            {isFetching ? <Loader2 className="w-3 h-3 animate-spin" /> : "Retry"}
+          </Button>
+        </div>
+      )}
       <div className="flex flex-col sm:flex-row gap-3 mb-4">
         <div className="relative flex-1">
           <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />

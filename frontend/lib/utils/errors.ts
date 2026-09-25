@@ -100,10 +100,10 @@ export function classifyError(err: unknown, phase: Phase, txHash?: string): Site
     return new SiteGradeError({
       ...base,
       kind: "rate_limited",
-      message: "The GenLayer Studio RPC is rate limiting requests from this browser.",
+      message: "The GenLayer Studio RPC is rate limiting requests from your IP.",
       hint:
-        "This is throttling on the shared public Studio endpoint, not a problem with the contract or this app's configuration. " +
-        "The app already retried with backoff. Wait about 30 seconds and try again.",
+        "Studio allows about 30 contract calls and transactions per minute per IP (reads retry automatically). " +
+        "Nothing was sent; wait up to a minute and try again.",
     });
   }
   if (code === 4902 || WRONG_NETWORK.test(detail)) {
